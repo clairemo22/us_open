@@ -1,0 +1,379 @@
+---
+title: "us open"
+output: html_document
+date: "2023-06-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(lme4)
+library(GGally)
+library(sjPlot)
+library(gghighlight)
+library(ggrepel)
+library(BasketballAnalyzeR)
+library(reshape2)
+library(Hmisc)
+library(rstatix)
+library(caret)
+library(ggpubr)
+library(randomForest)
+library(corrplot)
+```
+
+data from <https://www.kaggle.com/datasets/robikscube/pga-tour-golf-data-20152022>
+
+with the US open a day away, I'm interested in looking at data from past years to see where gaining strokes compared to the field is the biggest predictor of success. the US open is known for extremely tough roughs, so I was thinking that perhaps this tournament, compared to others, might be predicted by success in certain areas (perhaps around the green or approach) more than putting for example. 
+
+
+```{r}
+dat<- fread("/Users/claire/Documents/Script//ASA All PGA Raw Data - Tourn Level.csv", header=T, data.table=F)
+
+
+dat$finish2<- ifelse(dat$Finish=="CUT", 999, ifelse(dat$Finish=="DQ" | dat$Finish=="MDF" | dat$Finish=="WD" | dat$Finish=="W/D", NA, dat$Finish))
+
+# that code creates a new variable (finish2) that counts CUT as 999, and anyone we don't care about as NA. now we can get rid of the "T" (stands for a tie) and convert the variable to numeric
+
+dat$finish2<- gsub(pattern = 'T', x = dat$finish2, replacement = '', fixed = T)
+dat$finish2<- as.numeric(dat$finish2)
+
+dat$finish_cat<- ifelse(dat$finish2==1, "first", ifelse(dat$finish2==999, "cut", ifelse(dat$finish2>1, "not cut", NA)))
+
+table(dat$finish_cat)
+```
+
+## US open
+
+```{r}
+# unique(dat$`tournament name`)
+
+us<- dat %>% filter(`tournament name`=="U.S. Open")
+table(us$season)
+
+head(us)
+```
+
+# look at strokes gained and how they relate to each other and finish
+
+```{r}
+corrs<- us[,c(32:37,38)]
+res2 <- rcorr(as.matrix(corrs))
+
+
+corrs<- res2$r
+
+corrplot(corrs, method = "color",
+         type = "full",  number.cex = .6,
+         addCoef.col = "black", 
+         tl.col = "black", tl.srt = 90) 
+```
+
+the correlation plot above is almost exactly what i would expect. ultimately, strokes gained don't relate that strongly to each other (*r*s=|0.01-0.09|), with the exception of strokes gained tee to green and total. I'm not 100% sure how strokes gained tee to green and total are calculated, but they definitely are comprised of strokes gained in those other categories (e.g. strokes gained tee to green = strokes gained off the tee, on the approach and around the green). as is such, strokes gained tee to green does *not* correlate strongly with strokes gained putting. this is good as it shows our variables are largely independent of each other! however, it also shows we might be leery of including strokes gained tee to green and strokes gained total in our models, as they might induce multicollinearity. strokes gained total correlates very highly with strokes gained tee to green, *r*=0.80. 
+
+otherwise, strokes gained total and tee to green are most strongly associated with finish in the US open (*r*s=-0.55 - -0.68). the other strokes gained categories have correlations ranging from -.21 to -.42 with finish. this means, on average as strokes gained increase, average finish in the US open decreases. 
+
+# 1. predict who will make the cut (1/0)
+
+this is a classic classification machine learning problem. we can run logistic regression now, and see *what* predicts making the cut, but we cannot directly score or train a classification model until we have the finishing results from this tournament. 
+
+```{r}
+train<- us %>% select(player, `player id`, season, starts_with("sg"), finish_cat)
+
+head(train)
+
+summary(train)
+
+# train %>% filter(is.na(sg_putt)) # if anyone is NA they WD'd or were DQ'd
+
+train<- train %>% filter(!is.na(finish_cat)) # no NAs
+
+train$finish_class<- ifelse(train$finish_cat=="cut", 0, 1)
+
+table(train$finish_cat)
+table(train$finish_class)
+
+train$finish_cat<- NULL
+
+
+## saving for ML model in python
+
+# py<- train %>% select(-c(player, sg_t2g, sg_total))
+# fwrite(py, "usopen_classification_train.csv", sep=',')
+```
+
+### load strokes gained data from 2023 season up through the RBC canadian open
+
+these data I copy and pasted into excel sheets from <https://www.pgatour.com/stats/strokes-gained>. 
+
+```{r}
+names<- c("sg_total", "sg_ott", "sg_putt", "sg_app", "sg_arg", "sg_t2g")
+
+dat<- list()
+for (i in names) {
+  file<- paste0("/Users/claire/Desktop/usopen/",i, ".csv")
+  dat[[i]]<- fread(file, header=T, data.table = F)
+}
+
+tmp1<- merge(dat[[1]], dat[[2]], by="player")
+tmp2<- merge(tmp1, dat[[3]], by="player")
+tmp3<- merge(tmp2, dat[[4]], by="player")
+tmp4<- merge(tmp3, dat[[5]], by="player")
+test<- merge(tmp4, dat[[6]], by="player")
+
+head(test)
+nrow(test)
+
+rm(tmp1,tmp2,tmp3,tmp4,dat)
+```
+
+now we have training data from 2019-2022 and testing data that is only strokes gained in 2023 thus far. 
+
+```{r}
+head(test)
+head(train)
+
+test$season<- 2023
+
+test<- test %>% select(colnames(train)[c(1,3:9)])
+
+head(train)
+head(test)
+
+sum(test$player %in% train$player) # 121 in the testing set are in the training set
+
+ids<- train %>% select(player, `player id`) %>%
+  distinct(player, `player id`)
+test$`player id` <- factor(test$player, levels=ids$player, labels=ids$`player id`)
+
+
+## saving for ML model in python
+
+
+# py<- test %>% select(-c(sg_t2g, sg_total))
+# py$`player id` <- factor(py$player, levels=ids$player, labels=ids$`player id`)
+# py<- na.omit(py) 
+# py$player<- NULL
+# py<- py %>% select(colnames(train[c(2:7)]))
+# fwrite(py, "usopen_test.csv", sep=',')
+# fwrite(ids, "us_open_ids.csv")
+```
+
+### in the training data what predicts making the cut or not?
+
+here, we let strokes gained predict whether someone made the cut or not, and included random intercepts and slopes for both player and season. this allows each strokes gained category to have it's own intercept (or starting point) per season **and** per player but still draws from the same joint distribution. allowing random intercepts means each season strokes gained in a certain area may be higher or lower than in other seasons. just the same, some players might be gaining more strokes in certain areas than others due to specific skill sets or injuries, so it is important to allow random intercepts for players when they are measured more than once. allowing random intercepts helps account for non-independence of observations induced by occurrences of multiple players and years.
+
+it also allows each strokes gained category to have it's own slope (or effect on making the cut) per season because the course, as well as each player, changes year to year, and some courses might have tighter fairways or harder greens, worse weather etc.
+
+```{r}
+mod<- glm(finish_class~sg_ott+sg_app+sg_putt+sg_t2g+sg_arg + (season|season) + (1|`player id`), data=train)
+summary(mod)
+
+exp(coef(mod))
+```
+
+strokes gained mostly everywhere else still increase one's odds of making the cut. however, it seems like strokes gained tee to green has a negative impact on making the cut. looking at the logit coefficients exponentiated above, every additional stroke gained putting, for example, increases one's chances of making the cut by 1.18. every stroke gained off the tee increases one's chances of making the cut by about 303. every additional stroke gained tee to green increases one's odds of *missing* the cut by 0.004. a very small chance, but odd it is in that direction.
+
+
+```{r}
+mod<- glm(finish_class~sg_ott+sg_app+sg_putt+sg_arg + (season|season) + (1|`player id`), data=train)
+summary(mod)
+
+exp(coef(mod))
+```
+
+if we remove strokes gained tee to green, the odds ratios make a bit more sense, and are all in the direction that we would expect: gaining strokes in every area increases your chances of making the cut significantly.
+
+
+now we can make predictions based on who will make the cut. using the predict function, we get probabilities of making the cut. therefore, i am just going to `round()` to predict who will and who will not make the cut
+
+```{r}
+test$preds <- mod %>% predict(test, type = "response")
+hist(test$preds)
+
+test$preds<- round(test$preds)
+
+hist(test$preds)
+```
+
+```{r}
+madecut<- test %>% filter(preds==1) %>%
+  ggplot(aes(x=player, y=sg_total, color=sg_total)) + 
+  geom_point() +
+  ylab("average total strokes gained 2023") +
+  xlab("player")+
+  ggtitle("predicted to make cut")+
+  theme(legend.position = "blank", axis.text.x = element_text(angle=70, size=5, hjust = 1)) +
+  scale_colour_gradient(low="red", high="darkgreen")
+
+missedcut<- test %>% filter(preds==0) %>%
+  ggplot(aes(x=player, y=sg_total, color=sg_total)) + 
+  geom_point() +
+  ylab("average total strokes gained 2023") +
+  xlab("player")+
+  ggtitle("predicted to miss cut")+
+  theme(legend.position = "blank", axis.text.x = element_text(angle=70, size=5, hjust = 1))+
+  scale_colour_gradient(low="red", high="darkgreen")
+
+
+ggarrange(madecut, missedcut, nrow=2, ncol=1, common.legend = F)
+
+
+```
+
+
+# 2. predict overall finish
+
+here, we can run simple linear regression models to predict each person's finish based on strokes gained.
+
+```{r}
+linear<- us %>% select(player, `player id`, season, starts_with("sg"), finish2) %>%
+  filter(!is.na(finish2))
+
+head(linear)
+hist(linear$finish2)
+
+linear$finish2<- ifelse(linear$finish2==999, 78, linear$finish2)
+
+mod<- lmer(finish2~sg_ott+sg_app+sg_putt+sg_t2g+sg_arg +(season|season) + (1|`player id`), data=linear)
+summary(mod)
+
+
+## saving for ML model in python
+
+py<- linear %>% select(-c(sg_t2g, sg_total))
+py$`player id` <- factor(py$player, levels=ids$player, labels=ids$`player id`)
+py<- na.omit(py) 
+py$player<- NULL
+py<- py %>% select(colnames(train[c(2:7)]), finish2)
+fwrite(py, "usopen_regression_train.csv", sep=',')
+```
+
+the linear regression model is very similar to the logistic regression model, but now we are predicting overall finish in the US open, not just making/missing the cut. here, we designated everyone who missed the cut a score of 78 (the last place across all the US open data was 77). again, we see strokes gained almost everywhere makes a big impact on finish. for all variables *except* strokes gained tee to green, additional strokes gained decrease one's predicting finishing place. for example from the output above, for each additional stroke gained putting, a player's expected finish decreases by 11. for every additional stroke gained off the tee, a player's expected finish decreases by **247**. oddly enough again, for every additional stroke gained tee to green, a player's expected finish is actually increasing substantially. i'm not entirely sure how that works given strokes gained tee to green has to be some combination of strokes gained off the tee, on the approach and around the green. 
+
+
+```{r}
+mod<- lmer(finish2~sg_putt+sg_t2g +(season|season) + (1|`player id`), data=linear)
+summary(mod)
+```
+
+interestingly, if we just look at strokes gained tee to green and putting, they both drastically decrease one's expected finish with every additional stroke gained. that is the direction we would expect. I would guess perhaps there is some sort of suppression effect occurring when strokes gained tee to green is in the model with all other variables that comprise strokes gained tee to green. it might make sense thus to take it out of the machine learning model to follow. 
+
+```{r}
+mod<- lmer(finish2~sg_ott+sg_app+sg_putt+sg_arg +(season|season) + (1|`player id`), data=linear)
+summary(mod)
+```
+
+finally, removing tee to green from the original model we get much more realistic results. every additional stroke gained in every area (off the tee, on the approach, around the green and putting) all decrease one's expected finish by about 11 to 12. 
+
+
+```{r}
+
+set.seed(2)
+
+preProcess <- c("center","scale")
+trControl <- trainControl(method = "repeatedcv",number = 10,repeats = 10)
+
+model <- train(finish2~sg_putt+sg_arg+sg_app+sg_ott, data=linear, preProcess = preProcess, trControl=trControl) ### run the model 
+
+
+test$finish_pred <- predict(model, test) 
+
+head(test)
+
+plot<- test %>% arrange(finish_pred) 
+
+plot<- plot[1:50,]
+
+ggplot(plot, aes(x = reorder(player, finish_pred), y=finish_pred))+
+  geom_bar(stat="identity", fill="darkgreen")+
+  labs(title="Predicted finish for 2023 US open",x="Player", y = "predicted finish")+
+  theme_minimal()+
+  geom_text(
+    aes(label = round(finish_pred,0)),
+    colour = "white", size = 2,
+    vjust = 1.5, position = position_dodge(.9)) +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle=60, size=7, hjust = 1))
+```
+
+a simple linear prediction model here suggests Scottie will finish the lowest, followed by Jon Rahm, Tyrell Hatton, Xander, Rory and Tony Finau. not too bad if you ask me, although the lowest it is predicting someone to go is 16, so maybe not entirely precise. those guys are definitely mostly playing really well right now though!
+
+## 2.2 predict overall finish **for only those who made the cut last year**
+
+```{r}
+linear<- us %>% select(player, `player id`, season, starts_with("sg"), finish2) %>%
+  filter(!is.na(finish2)) %>%
+  filter(finish2<900)
+
+head(linear)
+hist(linear$finish2)
+table(linear$finish2)
+
+mod<- lmer(finish2~sg_ott+sg_app+sg_putt+sg_arg +(1|`player id`), data=linear)
+summary(mod)
+```
+
+the results are about the same, but each additional stroke gained is reducing one's expected finish a bit more, as expected as these are only the players who performed well enough to make the cut.
+
+
+```{r}
+sgt<- ggplot(linear, aes(x=sg_total, y=finish2, color=finish2)) + 
+  geom_point() +
+  facet_wrap(~season)+
+  ylab("Finish") +
+  xlab("Strokes gained total")+
+  geom_hline(yintercept = 10, color="red")+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgt2g<- ggplot(linear, aes(x=sg_t2g, y=finish2, color=finish2)) + 
+  geom_point() +
+  facet_wrap(~season)+
+  ylab("Finish") +
+  xlab("Strokes gained tee to green")+
+  geom_hline(yintercept = 10, color="red")+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgott<- ggplot(linear, aes(x=sg_ott, y=finish2, color=finish2)) + 
+  geom_point() +
+  facet_wrap(~season)+
+  ylab("Finish") +
+  xlab("Strokes gained off the tee")+
+  geom_hline(yintercept = 10, color="red")+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgapp<- ggplot(linear, aes(x=sg_app, y=finish2, color=finish2)) + 
+  geom_point() +
+  facet_wrap(~season)+
+  ylab("Finish") +
+  xlab("Strokes gained on the approach")+
+  geom_hline(yintercept = 10, color="red")+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgarg<- ggplot(linear, aes(x=sg_arg, y=finish2, color=finish2)) + 
+  geom_point() +
+  facet_wrap(~season)+
+  ylab("Finish") +
+  xlab("Strokes gained around the green")+
+  geom_hline(yintercept = 10, color="red")+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgp<- ggplot(linear, aes(x=sg_putt, y=finish2, color=finish2)) + 
+  geom_point() +
+  facet_wrap(~season)+
+  ylab("Finish") +
+  xlab("Strokes gained putting")+
+  geom_hline(yintercept = 10, color="red")+
+  scale_colour_gradientn(colours = terrain.colors(10))
+```
+
+
+the below plot shows all strokes gained categories and their relationships with finish over the last 3 years looked at in this analysis. strokes gained total has the clearest association with finish, which makes sense (green = lower finish = better). the red line represents a top 10 finish at a US open. for the most part, people finishing in the top 10 are also in the positive in strokes gained categories (but not always!)
+
+
+```{r}
+ggarrange(sgt, sgt2g, sgott, sgapp, sgarg, sgp, nrow=3, ncol=2, common.legend = T)
+```
+
