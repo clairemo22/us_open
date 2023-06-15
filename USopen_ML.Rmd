@@ -206,7 +206,7 @@ madecut<- test %>% filter(preds==1) %>%
   ylab("average total strokes gained 2023") +
   xlab("player")+
   ggtitle("predicted to make cut")+
-  theme(legend.position = "blank", axis.text.x = element_text(angle=70, size=5, hjust = 1)) +
+  theme(legend.position = "blank", axis.text.x = element_text(angle=75, size=4, hjust = 1)) +
   scale_colour_gradient(low="red", high="darkgreen")
 
 missedcut<- test %>% filter(preds==0) %>%
@@ -215,7 +215,7 @@ missedcut<- test %>% filter(preds==0) %>%
   ylab("average total strokes gained 2023") +
   xlab("player")+
   ggtitle("predicted to miss cut")+
-  theme(legend.position = "blank", axis.text.x = element_text(angle=70, size=5, hjust = 1))+
+  theme(legend.position = "blank", axis.text.x = element_text(angle=75, size=4, hjust = 1))+
   scale_colour_gradient(low="red", high="darkgreen")
 
 
@@ -244,12 +244,12 @@ summary(mod)
 
 ## saving for ML model in python
 
-py<- linear %>% select(-c(sg_t2g, sg_total))
-py$`player id` <- factor(py$player, levels=ids$player, labels=ids$`player id`)
-py<- na.omit(py) 
-py$player<- NULL
-py<- py %>% select(colnames(train[c(2:7)]), finish2)
-fwrite(py, "usopen_regression_train.csv", sep=',')
+# py<- linear %>% select(-c(sg_t2g, sg_total))
+# py$`player id` <- factor(py$player, levels=ids$player, labels=ids$`player id`)
+# py<- na.omit(py) 
+# py$player<- NULL
+# py<- py %>% select(colnames(train[c(2:7)]), finish2)
+# fwrite(py, "usopen_regression_train.csv", sep=',')
 ```
 
 the linear regression model is very similar to the logistic regression model, but now we are predicting overall finish in the US open, not just making/missing the cut. here, we designated everyone who missed the cut a score of 78 (the last place across all the US open data was 77). again, we see strokes gained almost everywhere makes a big impact on finish. for all variables *except* strokes gained tee to green, additional strokes gained decrease one's predicting finishing place. for example from the output above, for each additional stroke gained putting, a player's expected finish decreases by 11. for every additional stroke gained off the tee, a player's expected finish decreases by **247**. oddly enough again, for every additional stroke gained tee to green, a player's expected finish is actually increasing substantially. i'm not entirely sure how that works given strokes gained tee to green has to be some combination of strokes gained off the tee, on the approach and around the green. 
@@ -375,5 +375,162 @@ the below plot shows all strokes gained categories and their relationships with 
 
 ```{r}
 ggarrange(sgt, sgt2g, sgott, sgapp, sgarg, sgp, nrow=3, ncol=2, common.legend = T)
+```
+
+### compare these predictions to the predictions of sci-kit learn models in python
+
+i did very similar anlayses in python (which I am just learning, and not as comfortable with yet), so I want to compare the model outputs.
+
+it seems like sci-kit learn has better fleshed out models (and model tuning!) compared to R, so I have a hunch those should perform better
+
+```{r}
+sk_class<- fread("sklearn_cut_predictions.csv", header=T, data.table=F)
+head(sk_class)
+sk_class$V1<- NULL
+colnames(sk_class)[2]<- "preds_cut"
+
+sk_linear<- fread("sklearn_linear_preds.csv", header=T, data.table = F)
+head(sk_linear)
+sk_linear$V1<- NULL
+```
+
+select just classification predictions from the R model
+
+```{r}
+r_class<- test %>% select(player, preds)
+class<- merge(r_class, sk_class, by="player")
+
+head(class)
+
+library(psych)
+tetrachoric(class[,2:3]) ### the classification models correlate at 81%. not super high but pretty good
+
+
+table(class$preds) ### the R model is predicting 39 people to miss the cut
+table(class$preds_cut) ### the sci kit learn model is only predicting 21 people to miss the cut
+```
+
+the below plot shows who was predicted to the make cut or not in both models.
+
+if someone has a 2 on the y axis (confidence number) they were predicted to *make* the cut in both models. if someone only has a 1, they were only predicted to make the cut in *one* of the models. finally, if someone has a zero, or no bar, they were predicted to miss the cut in both models.
+
+```{r}
+class_long <- class %>% 
+  gather(preds, preds_cut, key = "model", value = "count") %>% 
+  mutate(model = recode(model, preds = "R classification model", preds_cut = "sci-kit learn model"))
+
+ggplot(class_long, aes(x = reorder(player, -count), y = count, fill = model)) + 
+  geom_bar(stat = "identity", position = "stack", color = "black") +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle=80, size=5, hjust = 1))+
+  xlab("player")+
+  ylab("confidence number")
+
+```
+
+
+select just linear predictions from the R model
+
+```{r}
+r_linear<- test %>% select(player, finish_pred)
+lin<- merge(r_linear, sk_linear, by="player")
+
+head(lin)
+
+cor.test(lin$finish_pred, lin$finish_preds)
+
+### wow! the two linear predictions correlate at almost 100% 
+```
+```{r}
+r_plot<- ggplot(plot, aes(x = reorder(player, finish_pred), y=finish_pred))+
+  geom_bar(stat="identity", fill="darkgreen")+
+  labs(title="Predicted finish for 2023 US open from R",x="Player", y = "predicted finish")+
+  theme_minimal()+
+  geom_text(
+    aes(label = round(finish_pred,0)),
+    colour = "white", size = 2,
+    vjust = 1.5, position = position_dodge(.9)) +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle=60, size=7, hjust = 1))
+
+
+plot2<- lin %>% arrange(finish_preds) 
+
+plot2<- plot2[1:50,]
+
+py_plot<- ggplot(plot2, aes(x = reorder(player, finish_preds), y=finish_preds))+
+  geom_bar(stat="identity", fill="darkgreen")+
+  labs(title="Predicted finish for 2023 US open from sci-kit learn",x="Player", y = "predicted finish")+
+  theme_minimal()+
+  geom_text(
+    aes(label = round(finish_preds,0)),
+    colour = "white", size = 2,
+    vjust = 1.5, position = position_dodge(.9)) +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle=60, size=7, hjust = 1))
+
+
+ggarrange(r_plot, py_plot, nrow=2, ncol=1, common.legend = F)
+```
+
+the people we are **most** confident will make the cut and finish top 20?
+
+```{r}
+top<- merge(lin, class, by="player")
+
+top<- top %>% filter(preds==1 & preds_cut==1) %>%
+  filter(finish_pred< 40 & finish_preds<40)
+
+season<- test %>% select(player, starts_with("sg"))
+
+top<- merge(top, season, by="player")
+```
+
+these are 33 people we're pretty confident will do well. here, we plot their strokes gained from the 2023 season thus far, arranged in order of predicted finish:
+
+```{r}
+
+sgt<- ggplot(top, aes(x = reorder(player, finish_preds), y=sg_total, color=finish_preds)) + 
+  geom_point() +
+  xlab("Player") +
+  ggtitle("Strokes gained total")+
+    theme(legend.position = "blank", axis.text.x = element_text(angle=60, size=4, hjust = 1))+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgt2g<- ggplot(top, aes(x = reorder(player, finish_preds), y=sg_t2g, color=finish_preds)) + 
+  geom_point() +
+  xlab("Player") +
+  ggtitle("Strokes gained tee to green")+
+  theme(legend.position = "blank", axis.text.x = element_text(angle=60, size=4, hjust = 1))+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgott<- ggplot(top, aes(x = reorder(player, finish_preds), y=sg_ott, color=finish_preds)) + 
+  geom_point() +
+  xlab("Player") +
+  ggtitle("Strokes gained off the tee")+
+    theme(legend.position = "blank", axis.text.x = element_text(angle=60, size=4, hjust = 1))+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgapp<- ggplot(top, aes(x = reorder(player, finish_preds), y=sg_app, color=finish_preds)) + 
+  geom_point() +
+  xlab("Player") +
+  ggtitle("Strokes gained on the approach")+
+    theme(legend.position = "blank", axis.text.x = element_text(angle=60, size=4, hjust = 1))+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgarg<- ggplot(top, aes(x = reorder(player, finish_preds), y=sg_arg, color=finish_preds)) + 
+  geom_point() +
+  xlab("Player") +
+  ggtitle("Strokes gained around the green")+
+    theme(legend.position = "blank", axis.text.x = element_text(angle=60, size=4, hjust = 1))+
+  scale_colour_gradientn(colours = terrain.colors(10))
+
+sgp<- ggplot(top, aes(x = reorder(player, finish_preds), y=sg_putt, color=finish_preds)) + 
+  geom_point() +
+  xlab("Player") +
+  ggtitle("Strokes gained putting")+
+    theme(legend.position = "blank", axis.text.x = element_text(angle=60, size=4, hjust = 1))+
+  scale_colour_gradientn(colours = terrain.colors(10))
+```
+
+```{r}
+ggarrange(sgt, sgt2g, sgott, sgapp, sgarg, sgp, nrow=3, ncol=2, common.legend = F)
 ```
 
